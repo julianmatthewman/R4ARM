@@ -1,0 +1,276 @@
+---
+title: "Missing data: Exploring the shortcomings of ad-hoc methods and creating multiple imputations"
+subtitle: "R 4 ARM"
+author: Julian Matthewman [link](https://github.com/julianmatthewman)
+---
+
+-------------------------------------------------------------------------------
+
+## Prerequisites
+This is an attempt at translating the Stata practical "Exploring the shortcomings of ad-hoc methods and creating multiple imputations in Stata" from LSHTM's Advanced Research Methods module into R.
+
+## What you will learn
+1. How to implement the missing category method and complete record analysis
+2. How to do multiple imputation for a binary variable
+3. The problems with mean and regression mean imputation for continuous variables with missing values
+4. How to do simple multiple imputation for a continuous variable
+
+-------------------------------------------------------------------------------
+
+## Data management
+
+```{r setup}
+#Either have the files you want to read in the same directory as this file, or change the working directory here:
+knitr::opts_knit$set(root.dir = ("/Users/Julian/Dropbox/Documents/MSc Epidemiology/Advanced Research Methods/Tuesday am Missing Data-20200421/Home practical/"))
+#This is a way of setting the working directory when working with chunks in R notebooks. Otherwise we would have to define the working directory separately for each chunk.
+```
+
+```{r message=FALSE, warning=FALSE}
+# Load packages
+library(haven)
+library(magrittr)
+library(epiDisplay)
+library(ggplot2)
+library(dplyr)
+
+# Limit significant digits to 2, remove scientific notation
+options(digits = 2, scipen = 999)
+```
+
+```{r}
+# Data import
+# Etiher have the data files in the same directory as this R notebook or use setwd("yourdirectory/ASMEdata2020")
+full <- read_dta("prac2full.dta")
+miss <- read_dta("prac2miss.dta")
+```
+
+Variable |  Missing Observations? | Details
+id          n                       Unique individual identifier
+sex         n                       Sex (0 = male, 1 = female)
+smok0       y                       Smoking status (1 = current smoker, 0 = non-smoker)
+x0          n                       A continuous variable measured at baseline
+y0          n                       A continuous variable measured at baseline
+y1          y                       y0 measured at a follow-up time
+t           n                       Time to death or censoring in years (censoring occurs at 10y)
+d           n                       Indicator of death (1 = died, 0 = censored)
+
+
+```{r}
+glimpse(full)
+glimpse(miss)
+summary(miss)
+```
+
+# 4.Estimating the mean of y1
+## 4.1 Full data analysis
+Using the complete data, estimate the mean of y1.
+```{r}
+mean(full$y1)
+```
+
+## 4.2 Check for missing values
+```{r}
+summary(miss$y1)
+#Create a variable M_y1 equal to 0 if y1 is observed and 1 if y1 is missing:
+miss <- miss %>% mutate(M_y1 = case_when(
+    is.na(y1) == TRUE ~ 1,
+    is.na(y1) == FALSE ~ 0
+))
+```
+
+## 4.3 Mean imputation
+Create a new variable called y1meanimp containing all the values from y1 and replacing all the missing values of y1 with the mean of the observed values of y1.
+```{r}
+miss <- miss %>% mutate(y1meanimp = case_when(
+    is.na(y1) == TRUE ~ mean(miss$y1, na.rm = TRUE),
+    is.na(y1) == FALSE ~ y1
+))
+```
+
+Create a scatterplot and a quantile-quantile plot of the imputed values:
+```{r}
+ggplot(miss) +
+    geom_point(aes(x=x0, y=y1meanimp))
+ggplot(miss) +
+    geom_qq(aes(sample = y1meanimp))
+```
+
+Calculate the mean, and corresponding confidence interval for y1meanimp
+```{r}
+ci(miss$y1meanimp)
+```
+
+## 4.4 Regression imputation
+Now we use a regression model of y1 on y0 and x0 to impute the missing values of y1.
+
+First, look at the results of a regression model of y1 on y0 and x0, and explain why y0 is a good candidate variable for imputing missing y1, but x0 may not be so useful.
+```{r}
+glm(y1 ~ y0, data = miss) %>% summary()
+```
+
+Now we use regression to impute the missing values of y1:
+```{r}
+model1 <- glm(y1 ~ y0 + x0, data = miss)
+
+miss$y1regimp <- NA
+miss$y1regimp[is.na(miss$y1)] <-  predict(model1, newdata = miss[is.na(miss$y1),])
+#predict value from model1. newdata is the data frame in which to look for variables with which to predict. 
+miss <- miss %>% mutate(y1regimp = case_when(
+    is.na(y1) == FALSE ~ y1,
+    is.na(y1) == TRUE ~ y1regimp
+))
+```
+
+Now we use the commands from the previous subsection to inspect the imputed data. Are these values more plausible?
+```{r}
+ggplot(miss) +
+    geom_point(aes(x=x0, y=y1regimp))
+ggplot(miss) +
+    geom_qq(aes(sample = y1regimp))
+ci(miss$y1regimp)
+glm(y1regimp ~ 1, data=miss) %>% summary() #to check if it is the same as in the Stata solutions
+```
+
+## 4.5 Multiple imputation
+Now we will try multiple imputation.
+As discussed above, it is useful to include variables that are either:
+1. both predictive of missingness and good predictors of missing y1 values or 
+2. good predictors of missing y1 values.
+Variables that only predict missingness do not need to be included in the imputation model.
+
+
+```{r}
+library(mice)
+#If we want to change the "settings" of mice, we can use the following commented code:
+#init = mice(miss) 
+#meth = init$method
+#predM = init$predictorMatrix
+#remove variables as predictors
+#predM[, c("id", "sex", "smok0", "t", "d", "M_y1", "y1meanimp", "y1regimp")]=0
+#skip a variable from imputation
+#meth[c("smok0")]=""
+#specifying imputation methods
+#meth[c("y1")]="pmm" 
+
+#run mulitple imputation
+#m = number of imputations to be done
+#seed = seed for random number generator, i.e.: with this seed should get the same results
+#method = select imputation method for each variable (here is left blank for the first two variables)
+#"pmm" or predicitve mean matching is the default method
+imp <- mice(miss[3:5], m=10, seed = 9861, method = c("", "", "pmm")) 
+#When using "norm.predict" as the imputation method it gives us the exact same results as above, when we did the regression mean imputation. I would assume that "norm.predict" should be equivalent to mi impute regress in stata; no idea why the results are different.
+
+miss$y1mi <-  complete(imp)$y1
+
+ggplot(miss) +
+    geom_point(aes(x=x0, y=y1mi))
+ggplot(miss) +
+    geom_qq(aes(sample = y1mi))
+
+ci(miss$y1mi)
+glm(y1mi ~ 1, data=miss) %>% summary()
+```
+
+
+# 5.Cox model
+We will skip this section; I can't get the code to work  ¯\_(ツ)_/¯ 
+
+#6. Your results
+```{r}
+results <- bind_rows(ci(full$y1),
+                     ci(miss$y1),
+                     ci(miss$y1meanimp),
+                     ci(miss$y1regimp),
+                     ci(miss$y1mi)) %>% 
+    bind_cols(tibble(method = c("Complete Data", "Complete Cases", "Mean Imp.", "Reg. Imp.", "Multiple Imp.")))
+results
+    
+ggplot(results) +
+    geom_point(aes(x=method, y=mean)) +
+    geom_errorbar(aes(x=method, y=mean, ymin = lower95ci, ymax = upper95ci)) +
+    coord_flip()
+```
+
+We can see that:
+* Complete records and mean imputation led to very biased results.
+* Regression imputation and even more Mean imputation have too short intervals; shorter than the actual data
+* See practical excercises for the rest
+
+
+```{r}
+#Comparing qq plots, don't know if this makes sense
+ggplot(full, aes(sample = y1)) +
+    geom_qq() +
+    geom_qq_line() +
+    scale_y_continuous(limits = c(-40, 40))
+ggplot(miss, aes(sample = y1mi)) +
+    geom_qq() +
+    geom_qq_line() +
+    scale_y_continuous(limits = c(-40, 40))
+ggplot(miss, aes(sample = y1regimp)) +
+    geom_qq() +
+    geom_qq_line() +
+    scale_y_continuous(limits = c(-40, 40))
+ggplot(miss, aes(sample = y1meanimp)) +
+    geom_qq() +
+    geom_qq_line() +
+    scale_y_continuous(limits = c(-40, 40))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#############################
+# Skipped section (not working due to porblem with nelsonaalen function)
+#############################
+
+## 5. Cox model with an incomplete binary covariate
+### 5.1 Full data analysis
+We begin by analysing the full dataset; we fit a Cox model relating survival to the covariates sex, smok0, y0 and x0.
+```{r}
+library(survival)
+cox <- coxph(Surv(full$t, full$d) ~ sex + smok0 + y0 + x0, data = full)
+#Going into survival analysis is a whole other (complicated) topic; suffice it to say that to fit a Cox model we need a survival object which we can create with the Surv() function from the survival package. If you have a look at Surv(full$t, full$d) you can see that it's basically a list of survival time, with "+" meaning a censored observation.
+summary(cox) #same results as in Stata
+```
+
+### 5.2 Complete record analysis
+```{r}
+library(survival)
+cox <- coxph(Surv(miss$t, miss$d) ~ sex + smok0 + y0 + x0, data = miss)
+summary(cox) #same results as in Stata
+```
+
+
+### 5.3 Missing category method
+As a way to make use of the available data in other covariates, create a ‘missing’ category for smoking. We then fit the Cox model again with the new variable.
+```{r}
+miss <- miss %>% mutate(smok0mc = case_when(is.na(smok0) == TRUE ~ 2,
+                                            is.na(smok0) == FALSE ~ smok0))
+
+cox <- coxph(Surv(miss$t, miss$d) ~ sex + as.factor(smok0mc) + y0 + x0, data = miss)
+summary(cox) #same results as in Stata
+```
+For x0, the missing category method does not seem unreasonable, but it is rather biased for smok0.
+
+### 5.4 Multiple imputation
+Note that any association between the incomplete covariate and outcome needs to be represented in the imputed data, and so it is important to include the outcome as a covariate of the imputation model. With survival data this is most conveniently done by including the Nelson- Aalen estimate of the cumulative hazard and the censoring indicator in the imputation model.
+```{r}
+nelsonaalen(miss, t, d) #there is an error with this function "Time variable is not numeric"
+```
+
