@@ -7,7 +7,7 @@ author: Julian Matthewman [link](https://github.com/julianmatthewman)
 -------------------------------------------------------------------------------
 
 ## Prerequisites
-Based on the Stata practical "Exploring the shortcomings of ad-hoc methods and creating multiple imputations in Stata" from LSHTM's Advanced Research Methods module.
+This is an attempt at translating the Stata practical "Exploring the shortcomings of ad-hoc methods and creating multiple imputations in Stata" from LSHTM's Advanced Research Methods module into R.
 
 ## What you will learn
 1. How to implement the missing category method and complete record analysis
@@ -153,18 +153,48 @@ library(mice)
 #meth[c("y1")]="pmm" 
 
 #run mulitple imputation
-imp <- mice(miss[3:5], m=10, seed = 9861)
+#m = number of imputations to be done
+#seed = seed for random number generator, i.e.: with this seed should get the same results
+#method = select imputation method for each variable (here is left blank for the first two variables)
+#"pmm" or predicitve mean matching is the default method
+imp <- mice(miss[3:5], m=10, seed = 9861, method = c("", "", "pmm")) 
+#When using "norm.predict" as the imputation method it gives us the exact same results as above, when we did the regression mean imputation. I would assume that "norm.predict" should be equivalent to mi impute regress in stata; no idea why the results are different.
 
-imp <- cbind(miss[1:2], complete(imp), miss[6:11])
+miss$y1mi <-  complete(imp)$y1
 
-ggplot(imp) +
-    geom_point(aes(x=x0, y=y1))
-ggplot(imp) +
-    geom_qq(aes(sample = y1))
+ggplot(miss) +
+    geom_point(aes(x=x0, y=y1mi))
+ggplot(miss) +
+    geom_qq(aes(sample = y1mi))
 
-ci(imp$y1)
-glm(y1 ~ 1, data=imp) %>% summary() #not the same as in stata... dont know why
+ci(miss$y1mi)
+glm(y1mi ~ 1, data=miss) %>% summary()
 ```
+
+
+# 5.Cox model
+We will skip this section; I can't get the code to work  ¯\_(ツ)_/¯ 
+
+#6. Your results
+```{r}
+results <- bind_rows(ci(full$y1),
+                     ci(miss$y1),
+                     ci(miss$y1meanimp),
+                     ci(miss$y1regimp),
+                     ci(miss$y1mi)) %>% 
+    bind_cols(tibble(method = c("Complete Data", "Complete Cases", "Mean Imp.", "Reg. Imp.", "Multiple Imp.")))
+results
+    
+ggplot(results) +
+    geom_point(aes(x=method, y=mean)) +
+    geom_errorbar(aes(x=method, y=mean, ymin = lower95ci, ymax = upper95ci)) +
+    coord_flip()
+```
+
+We can see that:
+* Complete records and mean imputation led to very biased results.
+* Regression imputation and even more Mean imputation have too short intervals; shorter than the actual data
+* See practical excercises for the rest
 
 
 ```{r}
@@ -173,7 +203,7 @@ ggplot(full, aes(sample = y1)) +
     geom_qq() +
     geom_qq_line() +
     scale_y_continuous(limits = c(-40, 40))
-ggplot(imp, aes(sample = y1)) +
+ggplot(miss, aes(sample = y1mi)) +
     geom_qq() +
     geom_qq_line() +
     scale_y_continuous(limits = c(-40, 40))
@@ -185,5 +215,62 @@ ggplot(miss, aes(sample = y1meanimp)) +
     geom_qq() +
     geom_qq_line() +
     scale_y_continuous(limits = c(-40, 40))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#############################
+# Skipped section (not working due to porblem with nelsonaalen function)
+#############################
+
+## 5. Cox model with an incomplete binary covariate
+### 5.1 Full data analysis
+We begin by analysing the full dataset; we fit a Cox model relating survival to the covariates sex, smok0, y0 and x0.
+```{r}
+library(survival)
+cox <- coxph(Surv(full$t, full$d) ~ sex + smok0 + y0 + x0, data = full)
+#Going into survival analysis is a whole other (complicated) topic; suffice it to say that to fit a Cox model we need a survival object which we can create with the Surv() function from the survival package. If you have a look at Surv(full$t, full$d) you can see that it's basically a list of survival time, with "+" meaning a censored observation.
+summary(cox) #same results as in Stata
+```
+
+### 5.2 Complete record analysis
+```{r}
+library(survival)
+cox <- coxph(Surv(miss$t, miss$d) ~ sex + smok0 + y0 + x0, data = miss)
+summary(cox) #same results as in Stata
+```
+
+
+### 5.3 Missing category method
+As a way to make use of the available data in other covariates, create a ‘missing’ category for smoking. We then fit the Cox model again with the new variable.
+```{r}
+miss <- miss %>% mutate(smok0mc = case_when(is.na(smok0) == TRUE ~ 2,
+                                            is.na(smok0) == FALSE ~ smok0))
+
+cox <- coxph(Surv(miss$t, miss$d) ~ sex + as.factor(smok0mc) + y0 + x0, data = miss)
+summary(cox) #same results as in Stata
+```
+For x0, the missing category method does not seem unreasonable, but it is rather biased for smok0.
+
+### 5.4 Multiple imputation
+Note that any association between the incomplete covariate and outcome needs to be represented in the imputed data, and so it is important to include the outcome as a covariate of the imputation model. With survival data this is most conveniently done by including the Nelson- Aalen estimate of the cumulative hazard and the censoring indicator in the imputation model.
+```{r}
+nelsonaalen(miss, t, d) #there is an error with this function "Time variable is not numeric"
 ```
 
