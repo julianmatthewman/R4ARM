@@ -1,0 +1,392 @@
+---
+title: "3: Propensity scores"
+subtitle: "r4arm"
+author: Andrea Mazzella [github](https://github.com/andreamazzella)
+output: html_notebook
+---
+
+# What you will learn
+
+* calculate a propensity score
+* estimate a treatment effect
+* propensity score matching
+
+-------------------------------------------------------------------------------
+
+# Data
+`RFA_pscore.dta`, via LSHTM Moodle (not publicly available).
+
+Key points:
+* Simulated dataset from a hypothetical cohort study
+* Patients with lung metastases
+* Treatment `rfa`, either radiofrequency ablation (RFA) or standard surgery
+* Composite outcome `dodp`: death or cancer progression within 3 years
+* Confounders: `hospital`, `primary` cancer site, metastasis `position`, metastasis diameter (`diacat`).
+
+-------------------------------------------------------------------------------
+
+# Packages
+
+```{r}
+install.packages("MatchIt")
+```
+```{r}
+library("haven")
+library("summarytools")
+library("epiDisplay")
+library("magrittr")
+library("MatchIt")
+library("tidyverse")
+options(scipen = 10, digits = 2)
+```
+
+-------------------------------------------------------------------------------
+
+# Data exploration
+
+We will first analyse the dataset with the usual techniques, *without* accounting for the propensity score.
+
+1. Import the `RFA_pscore.dta` dataset and explore its variables. 
+```{r}
+# Load data and apply labels
+rfa_pscore <- read_stata("RFA_pscore.dta") %>% mutate_if(is.labelled,as_factor)
+
+# Explore variables
+glimpse(rfa_pscore)
+
+# Data cleaning
+rfa_pscore$id <- as.factor(rfa_pscore$id)
+rfa_pscore$hospital <- as.factor(rfa_pscore$hospital)
+rfa_pscore$mets <- as.integer(rfa_pscore$mets)
+rfa_pscore %<>% mutate(rfa = recode(
+  rfa, "standard surgery" = "surgery",
+  "radiofrequency ablation" = "RF ablation"
+))
+rfa_pscore %<>% mutate(primary = recode(primary, "small bowel/colorectal" = "bowel"))
+
+# Data exploration
+summary(rfa_pscore)
+```
+
+2. Create frequency tables of the treatment and the outcome.
+```{r}
+rfa_pscore %$% freq(rfa, cumul = F)
+rfa_pscore %$% freq(dodp, cumul = F)
+```
+55% received RFA. The outcome is not rare (26%)
+
+
+3.	Use logistic regression to investigate the unadjusted association between the outcome and the treatment.
+Which treatment _seems to be_ associated with lower odds of death or cancer progression?
+```{r}
+glm(dodp ~ rfa,
+    family = "binomial",
+    data = rfa_pscore) %>%
+  logistic.display()
+```
+*Solution*
+Odds of outcome in RFA is half than in surgery (OR 0.55, 0.47-0.66).
+
+However, this might be due to confounding by indication. Let's use propensity scores to explore this.
+
+-------------------------------------------------------------------------------
+
+At this stage you have two possible approaches:
+- *Stratification*: you build a propensity score regression model, you stratify by propensity score quintiles, and you do your final analysis adjusting for propensity score quintile. This is commonly done as it is relatively simple; it's explored in points 4-11. 
+- *Matching*: you fit a model that creates matched subset of your whole dataset; you perform your final analysis on this. This is more complex but more accurate; it's presented in point 12.
+
+-------------------------------------------------------------------------------
+
+# Propensity score estimation
+
+4. Build a propensity score model: fit a logistic regression model with the treatment as the dependant variable and potential confounders as covariates; do _not_ include the study outcome.
+Which factors are associated with undergoing RFA or surgery?
+
+
+What does this tell us about our unadjusted association between RFA and outcome calculated above?
+
+```{r}
+ps_model <- glm(rfa ~ hospital + primary + position + diacat,
+                family = "binomial",
+                data = rfa_pscore)
+
+logistic.display(ps_model)
+# Hospital 3, moderate/difficult position, diameter < 1.5 are all associated with higher odds of undergoing RFA.
+```
+
+
+5. Use this model to estimate the propensity score. You use the function `predict()` that takes as an argument a regression model (so, the name of the model if you've assigned one, or you can pipe your model into this function). This function uses the model to estimate a propensity score for each row of your dataset – so you need to save these in a new variable.
+```{r}
+rfa_pscore$ps <- predict(ps_model, type = "response")
+summary(rfa_pscore$ps)
+```
+
+
+
+6. Summarise the propensity scores by treatment group: calculate the minimum, median and maximum PS.
+Which group tends to have higher propensity scores? Is this to be expected? 
+```{r}
+rfa_pscore %>%
+  group_by(rfa) %>%
+  summarise(
+    "min PS" = min(ps),
+    "median PS" = median(ps),
+    "max PS" = max(ps)
+  )
+```
+
+In which scenario would the two groups have similar propensity scores?
+
+
+7. Now plot the distribution of the propensity scores by treatment group, with two histograms.
+ What shape is the distribution?
+```{r}
+# Twin histograms with density plots
+rfa_pscore %>%
+  ggplot() +
+  geom_histogram(aes(x = ps, y = ..density.., fill = rfa), bins = 20) +
+  geom_density(aes(x = ps, y = ..density..)) +
+  facet_grid(. ~ rfa) +
+  theme(legend.position = "none") +
+  labs(title = "Propensity Score distribution according to treatment",
+       x = "Propensity Score",
+       y = "Distribution density")
+
+# Alternative 1: pooled histogram
+rfa_pscore %>% ggplot(aes(ps, fill = rfa)) + geom_histogram(bins = 20) +
+  labs(title = "Propensity Score distribution according to treatment",
+       x = "Propensity Score",
+       y = "Frequency",
+       fill = "Treatment")
+
+# Alternative 2: Box plots
+rfa_pscore %>% ggplot(aes(y = rfa, x = ps)) +
+  geom_boxplot(aes(fill = rfa)) +
+  theme(legend.position = "none") +
+  labs(title = "Propensity Score distribution according to treatment",
+       x = "Propensity Score",
+       y = NULL)
+
+# Alternative 3: violin plots
+rfa_pscore %>% ggplot(aes(y = rfa, x = ps)) +
+  geom_violin(aes(fill = rfa)) +
+  theme(legend.position = "none") +
+  labs(title = "Propensity Score distribution according to treatment",
+       x = "Propensity Score",
+       y = NULL)
+```
+These graphs reveal four peaks in the distribution; which patient characteristic(s) do you think is causing these peaks?
+
+-------------------------------------------------------------------------------
+
+# Propensity score stratification
+
+8. Stratify the propensity scores in quintiles.
+```{r}
+# Create quintiles
+rfa_pscore$ps_quint <- ntile(rfa_pscore$ps, 5) %>% as.factor()
+
+# Make sure it worked
+rfa_pscore %>%
+  group_by(ps_quint) %>%
+  summarise(
+    "min PS" = min(ps),
+    "median PS" = median(ps),
+    "max PS" = max(ps)
+  )
+
+# From now on, results will be slightly different to Stata. Not sure why, possibly the prediction method was different?
+```
+
+Now count how many patient had the outcome within each PS quintile:
+```{r}
+print("All observations")
+rfa_pscore %$% ctable(ps_quint, rfa,
+                      prop = "n", totals = F, headings = F)
+
+print("Only observations with outcome")
+rfa_pscore %>% filter(dodp == "yes") %$%ctable(ps_quint, rfa,
+                                               prop = "n", totals = F, headings = F)
+```
+
+
+9. Let's investigate the association between treatment and outcome within each quintile of propensity score.
+
+```{r}
+# Stratified logistic regression dodp ~ rfa stratified by ps_quint
+# aka the worst code I've ever written - but it works
+# there must be a way to iterate this?
+divider <- paste(rep("-", 70), collapse = "") # create a line separator
+
+print("PS quintile 1")
+glm(dodp ~ rfa, family = "binomial", data = filter(rfa_pscore, ps_quint == 1)) %>% logistic.display()
+
+print(c(divider, "PS quintile 2"))
+glm(dodp ~ rfa, family = "binomial", data = filter(rfa_pscore, ps_quint == 2)) %>% logistic.display()
+
+print(c(divider, "PS quintile 3"))
+glm(dodp ~ rfa, family = "binomial", data = filter(rfa_pscore, ps_quint == 3)) %>% logistic.display()
+
+print(c(divider, "PS quintile 4"))
+glm(dodp ~ rfa, family = "binomial", data = filter(rfa_pscore, ps_quint == 4)) %>% logistic.display()
+
+print(c(divider, "PS quintile 5"))
+glm(dodp ~ rfa, family = "binomial", data = filter(rfa_pscore, ps_quint == 5)) %>% logistic.display()
+
+```
+
+Similar but not the same as Stata output:
+PS  1: OR 1.34 (0.84-2.14)
+    2: OR 1.69 (1.20-2.36)
+    3: OR 0.76 (0.52-1.10)
+		4: OR 0.68 (0.44-1.05)
+		5: OR 0.50 (0.20-1.25)
+
+What do you notice in the OR in the different strata? Why do you think that's the case?
+
+```{r 9 - Failed for loop}
+output <- vector("list", 5)
+for (quintile in 1:5) {
+  print(quintile)
+  
+  result <- rfa_pscore %>% filter(ps_quint == quintile) %>%
+    glm(dodp ~ rfa,
+        family = "binomial",
+        data = .) %>%
+    logistic.display()
+  result
+}
+```
+
+```{r 9 - failed group by and do(glm())}
+fitted_models <-
+  rfa_pscore %>% group_by(ps_quint) %>% do(glm(dodp ~ rfa,
+                                               family = "binomial",
+                                               data = .))
+```
+
+
+10. Let's now calculate a single, overall estimate by adjusting for the PS stratum in a logistic regression model.
+```{r}
+glm(dodp ~ rfa + ps_quint,
+    family = "binomial",
+    data = rfa_pscore) %>% logistic.display()
+# Result: Adj OR 1.05 (0.87, 1.28); Wald's test p = 0.6.
+# Interpretation: Once you take the propensity score into account, there is no evidence of association between treatment and outcome.
+```
+
+Logistic regression estimates odds ratios. If we want to estimate the *risk ratio*, we need to use a different "implied link function" (not explored in ASME so far): the log link, and then exponentiate the estimates to go from log(RR) units to RR units.
+```{r}
+rr_model <- glm(dodp ~ rfa + ps_quint,
+                family = binomial(link = "log"),  # log link goes here
+                data = rfa_pscore)
+
+# Summary in log(RR) units
+summary(rr_model)
+
+# Extracting the estimates in RR units
+exp(coef(rr_model))[-1]
+
+# Extracting the 95% CI estimates in RR units
+exp(confint(rr_model))[-1, ]
+
+# logistic.display() works but it incorrectly labels RRs as ORs
+logistic.display(rr_model)
+
+# Results: RR 1.06 (0.92-1.22)
+```
+
+Similarly, if we want to estimate the *risk difference*, we need to use the identity link.
+```{r}
+rd_model <- glm(dodp ~ rfa + ps_quint,
+                family = binomial(link = "identity"),  # log link goes here
+                data = rfa_pscore)
+
+# Summary
+summary(rd_model)
+
+# Extracting the estimates in RD units
+coef(rd_model)[-1]
+
+# Extracting the 95% CI estimates in RD units
+confint(rd_model)[-1, ]
+
+# Result: RD -0.0038 (-0.039, 0.029)
+# Stata:  RD -0.0045 (-0.041, 0.032)
+```
+
+
+11. (question that doesn't need coding)
+
+-------------------------------------------------------------------------------
+
+# Propensity score matching
+
+We'll use functions from package MatchIt.
+
+You need to create a matched logistic regression model, which finds pairs of observations that have similar propensity scores, but differ in the treatment status.
+
+You do this with the function `matchit()`: your outcome goes before the ~, your propensity score model goes after it. 
+
+Before you do this you need to remove missing values, and convert your outcome variable to integer 0/1 or logic FALSE/TRUE.
+
+```{r}
+# Omit observations with missing data
+rfa_nomiss <- rfa_pscore %>% na.omit()
+
+# Recode outcome as 0/1 integer
+# There must be a quicker way of doing this with dplyr
+rfa_nomiss$dodp <- as.character(rfa_nomiss$dodp)
+rfa_nomiss$dodp[rfa_nomiss$dodp == "no"] <- 0
+rfa_nomiss$dodp[rfa_nomiss$dodp == "yes"] <- 1
+rfa_nomiss$dodp <- as.integer(rfa_nomiss$dodp)
+
+# Fit a matching logistic regression model
+mod_matched <-
+  matchit(dodp ~ rfa + hospital + primary + position + diacat,
+          method = "nearest",
+          data = rfa_nomiss)
+mod_matched
+```
+Note that when you call this model, you can see how many people were not matched (which STATA doesn't do)
+
+Then, you you use this model to match the data, with `match.data()`, and you assign it to a new dataset. This will create a new variable, "distance", which represents the propensity score. This new dataset will have lost some observations, because they were not matched.
+
+```{r}
+# Create a dataset only with the matched observations. This includes a new variable called "distance", which is the propensity score.
+rfa_matched <- match.data(mod_matched)
+dim(rfa_matched)
+```
+
+Now, _I guess_ we can fit our final model to this matched dataset?
+Like this?
+```{r}
+rd_matched_model <- glm(dodp ~ rfa,
+                        family = binomial(link = "identity"),
+                        data = rfa_matched)
+
+# Summary
+summary(rd_matched_model)
+
+# Extracting the estimates in RD units
+coef(rd_matched_model)[-1]
+
+# Extracting the 95% CI estimates in RD units
+confint(rd_matched_model)[-1,]
+
+# Results: RD +0.026 (-0.047, +0.052)
+# Stata:   RD -0.028 (-0.089, +0.033)
+```
+How do you interpret these risk difference results?
+
+
+13. Compare the results from stratification and the results from matching.
+
+- Which risk difference has the wider confidence interval? Why do you think that is?
+- Are the two risk difference estimates different? Would you expect them to be?
+
+-------------------------------------------------------------------------------
+
+## References
+1. ARM Propensity Score practical
+2. https://sejdemyr.github.io/r-tutorials/statistics/tutorial8.html
