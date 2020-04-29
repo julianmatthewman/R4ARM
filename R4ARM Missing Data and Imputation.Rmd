@@ -32,6 +32,7 @@ library(magrittr)
 library(epiDisplay)
 library(ggplot2)
 library(dplyr)
+library(forcats)
 
 # Limit significant digits to 2, remove scientific notation
 options(digits = 2, scipen = 999)
@@ -156,9 +157,11 @@ library(mice)
 #m = number of imputations to be done
 #seed = seed for random number generator, i.e.: with this seed should get the same results
 #method = select imputation method for each variable (here is left blank for the first two variables)
-#"pmm" or predicitve mean matching is the default method
-imp <- mice(miss[3:5], m=10, seed = 9861, method = c("", "", "pmm")) 
-#When using "norm.predict" as the imputation method it gives us the exact same results as above, when we did the regression mean imputation. I would assume that "norm.predict" should be equivalent to mi impute regress in stata; no idea why the results are different.
+##"pmm" or predicitve mean matching is the default method
+##Here we choose "norm" which is for Baysian linear regression, which produces the results most closely matching the practical solutions.
+imp <- mice(miss[3:5], m=10, seed = 9861, method = c("", "", "norm")) 
+
+#Normally I would assume we should use "norm.predict" for "Linear regression, predicted values", however when using "norm.predict" as the imputation method it gives us the exact same results as above, when we did the regression mean imputation. I would assume that "norm.predict" should be equivalent to mi impute regress in stata; no idea why the results are different.
 
 miss$y1mi <-  complete(imp)$y1
 
@@ -171,7 +174,6 @@ ci(miss$y1mi)
 glm(y1mi ~ 1, data=miss) %>% summary()
 ```
 
-
 # 5.Cox model
 We will skip this section; I can't get the code to work  ¯\_(ツ)_/¯ 
 
@@ -183,17 +185,21 @@ results <- bind_rows(ci(full$y1),
                      ci(miss$y1regimp),
                      ci(miss$y1mi)) %>% 
     bind_cols(tibble(method = c("Complete Data", "Complete Cases", "Mean Imp.", "Reg. Imp.", "Multiple Imp.")))
+results$method <- fct_rev(factor(results$method, levels = results$method))
 results
     
 ggplot(results) +
     geom_point(aes(x=method, y=mean)) +
     geom_errorbar(aes(x=method, y=mean, ymin = lower95ci, ymax = upper95ci)) +
-    coord_flip()
+    coord_flip() +
+    scale_y_continuous(limits = c(-3, 2))
 ```
+Looks almost like the one in the practical solutions :)
 
 We can see that:
-* Complete records and mean imputation led to very biased results.
-* Regression imputation and even more Mean imputation have too short intervals; shorter than the actual data
+* Complete records and mean imputation laed to very biased results.
+* Regression imputation and, even more so, Mean imputation have too short intervals; shorter than the actual data
+* Multiple Imputation produces the result closest to the actual data
 * See practical excercises for the rest
 
 
@@ -274,3 +280,11 @@ Note that any association between the incomplete covariate and outcome needs to 
 nelsonaalen(miss, t, d) #there is an error with this function "Time variable is not numeric"
 ```
 
+
+
+
+
+-------------------------------------------------
+## References
+* LSHTM ARM imputation practical
+* https://datascienceplus.com/handling-missing-data-with-mice-package-a-simple-approach/
